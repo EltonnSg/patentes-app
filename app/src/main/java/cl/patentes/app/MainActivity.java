@@ -1,6 +1,8 @@
 package cl.patentes.app;
 
 import android.content.Intent;
+import android.os.Handler;
+import android.os.Looper;
 import android.graphics.Bitmap;
 import android.graphics.Color;
 import android.graphics.Rect;
@@ -57,6 +59,16 @@ public class MainActivity extends AppCompatActivity {
     private TextRecognizer recognizer;
     private Store store;
     private final List<Ingreso> records = new ArrayList<>();
+    private final ExecutorService net = Executors.newSingleThreadExecutor();
+    private final Handler handler = new Handler(Looper.getMainLooper());
+    private boolean syncing = false;
+    private TextView txtSync;
+    private final Runnable retry = new Runnable() {
+        @Override public void run() {
+            sincronizar();
+            handler.postDelayed(this, 60000);
+        }
+    };
 
     // Estado del formulario
     private long curTs = 0;
@@ -100,6 +112,8 @@ public class MainActivity extends AppCompatActivity {
         txtVeredicto = findViewById(R.id.txtVeredicto);
         txtConteo = findViewById(R.id.txtConteo);
         txtNota = findViewById(R.id.txtNota);
+        txtSync = findViewById(R.id.txtSync);
+        findViewById(R.id.btnNube).setOnClickListener(v -> configurarNube());
         prev1 = findViewById(R.id.prev1);
         prev2 = findViewById(R.id.prev2);
         edPatente = findViewById(R.id.edPatente);
@@ -502,6 +516,7 @@ public class MainActivity extends AppCompatActivity {
 
         resetForm();
         renderList();
+        sincronizar();
         setSt(3, r.coincide.equals("No") ? "Ingreso guardado. Ojo: las patentes no coinciden." : "Ingreso guardado.",
                 r.coincide.equals("No") ? WARN : OK);
     }
@@ -542,6 +557,7 @@ public class MainActivity extends AppCompatActivity {
         });
         txtConteo.setText(sorted.size() + (sorted.size() == 1 ? " registro" : " registros"));
         btnExcel.setEnabled(!sorted.isEmpty());
+        actualizarTextoSync();
         lista.removeAllViews();
         if (sorted.isEmpty()) {
             TextView t = new TextView(this);
@@ -575,7 +591,7 @@ public class MainActivity extends AppCompatActivity {
             } else ((TextView) v.findViewById(R.id.itConductor)).setText("Conductor " + (r.codConductor.isEmpty() ? "—" : r.codConductor)
                     + (r.conductor.isEmpty() ? "" : " · " + r.conductor)
                     + "\nServicio " + (r.servicio.isEmpty() ? "—" : r.servicio));
-            ((TextView) v.findViewById(R.id.itHora)).setText(r.hora);
+            ((TextView) v.findViewById(R.id.itHora)).setText(r.hora + (urlNube().isEmpty() ? "" : (r.enviado ? "  ✓ en la hoja" : "  ⏳ pendiente")));
             loadThumb((ImageView) v.findViewById(R.id.imgF1), r.foto1);
             ImageView im2 = v.findViewById(R.id.imgF2);
             if (r.foto2 == null || r.foto2.isEmpty()) im2.setVisibility(View.GONE);
@@ -703,11 +719,103 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
+    // ---------- hoja de Google ----------
+    private String urlNube() {
+        return getSharedPreferences("cfg", MODE_PRIVATE).getString("url", "");
+    }
+
+    private void actualizarTextoSync() {
+        if (txtSync == null) return;
+        if (urlNube().isEmpty()) {
+            txtSync.setText("Hoja de Google: sin conectar. Los ingresos quedan solo en este teléfono.");
+            return;
+        }
+        int pend = 0;
+        for (Ingreso r : records) if (!r.enviado) pend++;
+        txtSync.setText(pend == 0 ? "Hoja de Google: todo enviado ✓"
+                : "Hoja de Google: " + pend + (pend == 1 ? " ingreso pendiente" : " ingresos pendientes") + " de enviar");
+    }
+
+    private void configurarNube() {
+        final EditText in = new EditText(this);
+        in.setHint("https://script.google.com/macros/s/…/exec");
+        in.setText(urlNube());
+        in.setSingleLine(false);
+        in.setMinLines(3);
+        new AlertDialog.Builder(this)
+                .setTitle("Enlace de la hoja de Google")
+                .setMessage("Pega el enlace de la aplicación web (termina en /exec). Déjalo vacío para desconectar.")
+                .setView(in)
+                .setPositiveButton("Guardar y enviar", (d, w) -> {
+                    String u = in.getText().toString().trim();
+                    if (!u.isEmpty() && !u.startsWith("https://script.google.com/")) {
+                        Toast.makeText(this, "Ese enlace no parece válido.", Toast.LENGTH_LONG).show();
+                        return;
+                    }
+                    getSharedPreferences("cfg", MODE_PRIVATE).edit().putString("url", u).apply();
+                    renderList();
+                    sincronizar();
+                })
+                .setNegativeButton("Cancelar", null)
+                .show();
+    }
+
+    private byte[] fotoParaNube(String path) {
+        if (path == null || path.isEmpty()) return null;
+        try {
+            Bitmap b = ImageUtil.decode(new File(path), 1100);
+            return b == null ? null : ImageUtil.jpegBytes(b, 75);
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    private void sincronizar() {
+        final String url = urlNube();
+        if (url.isEmpty() || syncing) return;
+        final List<Ingreso> pend = new ArrayList<>();
+        for (Ingreso r : records) if (!r.enviado) pend.add(r);
+        if (pend.isEmpty()) {
+            actualizarTextoSync();
+            return;
+        }
+        syncing = true;
+        net.execute(() -> {
+            for (final Ingreso r : pend) {
+                boolean ok = Sync.enviar(url, r, fotoParaNube(r.foto1), fotoParaNube(r.foto2));
+                if (!ok) break;   // sin señal o error: se reintenta más tarde
+                runOnUiThread(() -> {
+                    r.enviado = true;
+                    final List<Ingreso> snap = new ArrayList<>(records);
+                    ex.execute(() -> store.save(snap));
+                    renderList();
+                });
+            }
+            runOnUiThread(() -> {
+                syncing = false;
+                actualizarTextoSync();
+            });
+        });
+    }
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        handler.postDelayed(retry, 3000);
+    }
+
+    @Override
+    protected void onPause() {
+        super.onPause();
+        handler.removeCallbacks(retry);
+    }
+
     @Override
     protected void onDestroy() {
         super.onDestroy();
         recognizer.close();
         ex.shutdown();
         thumbEx.shutdown();
+        net.shutdown();
     }
 }

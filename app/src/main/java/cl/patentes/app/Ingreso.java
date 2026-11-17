@@ -20,6 +20,7 @@ public final class Ingreso {
     public boolean conDesperfectos;
     public boolean mantencion;
     public boolean traeVoucher = true;
+    public boolean enviado;
     public String foto1 = "";
     public String foto2 = "";
 
@@ -40,6 +41,7 @@ public final class Ingreso {
         o.put("conDesperfectos", conDesperfectos);
         o.put("mantencion", mantencion);
         o.put("traeVoucher", traeVoucher);
+        o.put("enviado", enviado);
         o.put("foto1", foto1);
         o.put("foto2", foto2);
         return o;
@@ -62,6 +64,7 @@ public final class Ingreso {
         r.conDesperfectos = o.optBoolean("conDesperfectos");
         r.mantencion = o.optBoolean("mantencion");
         r.traeVoucher = o.optBoolean("traeVoucher", true);
+        r.enviado = o.optBoolean("enviado", false);
         r.foto1 = o.optString("foto1");
         r.foto2 = o.optString("foto2");
         return r;
